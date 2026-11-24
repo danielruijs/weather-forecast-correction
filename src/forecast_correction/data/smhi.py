@@ -12,7 +12,7 @@ Layout on disk (under ``SMHI_DIR``):
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import polars as pl
 import requests
@@ -53,8 +53,12 @@ def _get(url: str, retries: int = 5) -> requests.Response | None:
     raise AssertionError("unreachable")
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
 def _ms_to_dt(ms: int) -> datetime:
-    return datetime.fromtimestamp(ms / 1000, tz=UTC)
+    # not datetime.fromtimestamp: on Windows it rejects negative (pre-1970) timestamps
+    return _EPOCH + timedelta(milliseconds=ms)
 
 
 def fetch_stations() -> None:
