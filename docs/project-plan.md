@@ -43,22 +43,42 @@ covering the next hours.
 ## 2. Pipeline overview
 
 ```mermaid
-flowchart LR
-    subgraph fetch["1 · Fetch (Modal, one-off)"]
-        A1["SMHI API<br/>observations"] --> B1["obs/*.parquet<br/>model inputs + ground truth<br/>(all models)"]
-        A2["MEPS archive<br/>forecasts"] --> B2["meps/YYYY/MM/*.parquet<br/>forecast to correct + inputs<br/>(all models)"]
-        A3["ERA5<br/>global weather"] --> B3["wn2/*.parquet<br/>WN2 representation per station<br/>(WN2 head only, extension)"]
+flowchart TD
+    sources["SMHI observations<br/>MEPS forecasts"]
+    era5["ERA5"]
+
+    subgraph modal["Modal app"]
+        backfill["backfill · once<br/>2016 → today"]
+        update["update · hourly<br/>new forecasts + observations"]
+        wn2["wn2 · extension<br/>ERA5 → WN2 representation"]
+        raw[("Volume · raw data")]
+        features["feature builder"]
+        experiments["experiments<br/>train, select, calibrate, test"]
+        retrain["retrain · monthly"]
+        models[("Volume · models")]
+        predict["predict · hourly"]
+        archive[("Volume · predictions")]
+        cache[("Dict · dashboard cache")]
+        web["web · FastAPI"]
+
+        backfill --> raw
+        update --> raw
+        wn2 -.-> raw
+        raw --> features
+        features --> experiments --> models
+        features --> retrain --> models
+        features --> predict
+        models --> predict --> archive --> cache --> web
+        experiments --> archive
     end
-    B1 --> J["2 · Join + features<br/>one row per station × prediction time"]
-    B2 --> J
-    B3 -.-> J
-    J --> T["3 · Train all models on train set,<br/>pick best on validation year"]
-    T --> RF["4 · Refit best model<br/>on train + validation"]
-    RF --> C["5 · Conformal intervals<br/>on calibration year"]
-    C --> EV["6 · Evaluate on test year<br/>(used once, for reporting)"]
-    RF --> CT["7 · Continuous-training curve<br/>for the best model"]
-    EV --> UI["8 · UI / live demo<br/>(newest MEPS forecast + latest SMHI obs)"]
+
+    sources --> backfill
+    sources --> update
+    era5 -.-> wn2
+    web --> browser["browser"]
 ```
+
+Dashed = WN2 extension. Volumes keep data (parquet); the Dict holds the latest predictions for the UI.
 
 All steps are first developed locally on a small subset; only full runs go to Modal.
 
