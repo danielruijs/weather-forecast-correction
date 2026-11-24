@@ -118,7 +118,7 @@ def _build_grid(ds: netCDF4.Dataset, stations: pl.DataFrame) -> Grid:
             "cell_elevation": geopotential[grid.iy, grid.ix] / 9.80665,  # model terrain height (m)
         }
     ).write_parquet(tmp)
-    tmp.rename(path)
+    tmp.replace(path)  # not rename: on Windows it fails when the target exists
     return grid
 
 
@@ -232,7 +232,9 @@ def _fetch_run(run: datetime, stations: pl.DataFrame, retries: int = 4) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     df.write_parquet(tmp)
-    tmp.rename(path)  # atomic, so an interrupted write is never mistaken for a finished run
+    # atomic, so an interrupted write is never mistaken for a finished run;
+    # replace, not rename: on Windows rename fails when the target exists
+    tmp.replace(path)
     return "ok"
 
 
