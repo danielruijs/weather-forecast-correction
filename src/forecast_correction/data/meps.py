@@ -9,15 +9,21 @@ Sources, tried in this order:
 ==================  ======================  ======================================
 file                available               notes
 ==================  ======================  ======================================
-live ``det_2_5km``  last ~2 days            published ~2.4 h after run start
-``det_2_5km``       2020-02 → 2023-10,      same values as det_sfc, faster to read
-                    partly 2024 →
-``det_sfc``         2023-10 →               published ~3.6 h after run start
-``subset``          2016-11 → 2020-02       10-member ensemble, member 0 = control
+live ``det_2_5km``  last ~2 days            complete file appears ~2.4 h after run start
+``det_2_5km``       2020-02 → 2023-10,      same values as det_sfc, faster to read;
+                    partly 2024 →           files created ~2.4 h after run start
+``det_sfc``         2023-10 →               appears ~1.9 h after run start (late steps
+                                            may still be filling; an earlier estimate
+                                            was ~3.6 h)
+``subset``          2016-11 → 2020-02       10-member ensemble, member 0 = control;
+                                            file timestamps are from later reprocessing
 ==================  ======================  ======================================
 
 Output: ``MEPS_DIR/runs/YYYY/MM/meps_YYYYMMDDTHHZ.parquet``, one row per station × lead
 (0..MAX_LEAD h), plus ``MEPS_DIR/grids/*.parquet`` with the station → grid-cell mapping.
+
+Publication times can't be recovered from the archive, so every run gets the same documented
+estimate, ``available_time = run_time + AVAILABILITY_DELAY`` (see the constant).
 """
 
 import logging
@@ -50,6 +56,10 @@ SOURCES = (
 FIRST_RUN = datetime(2016, 11, 8, tzinfo=UTC)
 RUN_INTERVAL = timedelta(hours=6)  # 00, 06, 12, 18 UTC
 MAX_LEAD = 48  # hours; +24 h from the newest run needs ≤ 33.5 h, from two runs back (missing runs, run-to-run features) ≤ 45.5 h
+# When a run counts as available. The live feed (what the deployed system reads) had complete
+# runs ~2 h 25 min after run start (catalog times 2026-11-26/27, 06Z on 2026-11-27 at 2 h 26 min);
+# the hourly update then picks a run up at the next full hour, ~3 h after its start.
+AVAILABILITY_DELAY = timedelta(hours=3)
 WORKERS = 4  # more parallel connections get rejected by the server
 
 # name in output -> netCDF variable
@@ -208,6 +218,7 @@ def extract_run(run: datetime, stations: pl.DataFrame) -> pl.DataFrame | None:
         }
     ).select(
         "run_time",
+        (pl.col("run_time") + AVAILABILITY_DELAY).alias("available_time"),
         (pl.col("run_time") + pl.duration(hours=pl.col("lead"))).alias("valid_time"),
         "lead",
         "station_id",
