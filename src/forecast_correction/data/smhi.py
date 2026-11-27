@@ -6,13 +6,19 @@ Layout on disk (under ``SMHI_DIR``):
 
 - ``stations.parquet``              one row per selected station (latest position)
 - ``station_positions.parquet``     position history per station (stations can move)
-- ``obs/{param}/{station}.parquet`` columns ``time`` (UTC), ``value``, ``quality``, ``source``
+- ``obs/{param}/YYYY-MM.parquet``    all stations for one month: ``station_id``, ``time`` (UTC),
+  ``value``, ``quality``, ``source``
+
+``fetch_observations`` downloads the full history (run locally once, then uploaded to Modal); the
+hourly update on Modal (``update_observations``) downloads the latest data. Both merge into the
+monthly files.
 """
 
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import polars as pl
 import requests
@@ -105,55 +111,138 @@ def load_stations() -> pl.DataFrame:
     return pl.read_parquet(SMHI_DIR / "stations.parquet")
 
 
-def _download_csv(url: str, source: str) -> pl.DataFrame:
+OBS_SCHEMA = {
+    "station_id": pl.Int64,
+    "time": pl.Datetime("us", "UTC"),
+    "value": pl.Float32,
+    "quality": pl.String,
+    "source": pl.String,
+}
+
+
+def _download_csv(url: str, station_id: int, source: str) -> pl.DataFrame:
     """Parse an SMHI metobs CSV: a variable-length header, then `Datum;Tid (UTC);value;Kvalitet` rows."""
     r = _get(url)
     lines = r.text.splitlines() if r is not None else []
     start = next((i + 1 for i, line in enumerate(lines) if line.startswith("Datum;Tid (UTC)")), len(lines))
     rows = [line.split(";")[:4] for line in lines[start:]]
     rows = [row for row in rows if len(row) == 4 and row[0] >= OBS_START]
-    return pl.DataFrame(rows, schema=["date", "tod", "value", "quality"], orient="row").select(
-        (pl.col("date") + " " + pl.col("tod")).str.to_datetime("%Y-%m-%d %H:%M:%S", time_zone="UTC").alias("time"),
-        pl.col("value").cast(pl.Float32, strict=False),  # occasional empty values -> null
-        pl.col("quality").cast(pl.Categorical),
-        pl.lit(source).cast(pl.Categorical).alias("source"),
+    n = len(rows)
+    return pl.DataFrame(
+        {
+            "station_id": [station_id] * n,
+            "time": pl.Series([f"{r[0]} {r[1]}" for r in rows], dtype=pl.String).str.to_datetime(
+                "%Y-%m-%d %H:%M:%S", time_zone="UTC"
+            ),
+            "value": pl.Series([r[2] for r in rows], dtype=pl.String).cast(pl.Float32, strict=False),  # empty -> null
+            "quality": [r[3] for r in rows],
+            "source": [source] * n,
+        },
+        schema=OBS_SCHEMA,
     )
 
 
-def fetch_station_param(station_id: int, param: str) -> None:
+def fetch_station_param(station_id: int, param: str) -> pl.DataFrame:
     """Download one station × parameter: quality-controlled archive + unchecked latest months."""
     base = f"{API}/parameter/{PARAMS[param]}/station/{station_id}/period"
-    archive = _download_csv(f"{base}/corrected-archive/data.csv", "archive")
-    latest = _download_csv(f"{base}/latest-months/data.csv", "latest")
+    archive = _download_csv(f"{base}/corrected-archive/data.csv", station_id, "archive")
+    latest = _download_csv(f"{base}/latest-months/data.csv", station_id, "latest")
     if archive.height:  # archive is quality-controlled -> wins where both cover the same period
         latest = latest.filter(pl.col("time") > archive["time"].max())
+    return pl.concat([archive, latest])
 
-    out = SMHI_DIR / "obs" / param / f"{station_id}.parquet"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    dedupe(pl.concat([archive, latest])).write_parquet(out)
+
+def fetch_latest(station_id: int, param: str, period: str) -> pl.DataFrame:
+    """``latest-day`` (~24 h) or ``latest-months`` (~4 months) of one station × parameter."""
+    url = f"{API}/parameter/{PARAMS[param]}/station/{station_id}/period/{period}/data.csv"
+    return _download_csv(url, station_id, "latest")
 
 
 def dedupe(obs: pl.DataFrame) -> pl.DataFrame:
-    """One row per time, sorted by time.
+    """One row per station and hour, sorted by station and time.
 
-    The archive occasionally holds two values for the same hour (e.g. pressure at 8 stations,
-    2025-02-05 → 02-22: one checked "G", one suspect "Y"); keep the checked one.
+    Preference: archive over latest (quality-controlled), then checked "G" over suspect "Y" (the
+    archive holds both for pressure at 8 stations, 2025-02-05 → 02-22), then the most recently
+    added row.
     """
+    keys = ["station_id", "time"]
     return (
-        obs.sort("time", pl.col("quality").cast(pl.String) != "G")  # G first within each hour
-        .unique("time", keep="first", maintain_order=True)
+        obs.with_row_index("_order")
+        .sort(
+            pl.col("source") != "archive", pl.col("quality") != "G", "_order", descending=[False, False, True]
+        )
+        .unique(keys, keep="first")
+        .drop("_order")
+        .sort(keys)
     )
 
 
-def fetch_observations() -> None:
-    jobs = [
-        (row["station_id"], p)
-        for row in load_stations().iter_rows(named=True)
-        for p in PARAMS
-        if row[f"has_{p}"]
-    ]
+def obs_dir(param: str) -> Path:
+    return SMHI_DIR / "obs" / param
+
+
+def write_observations(param: str, new: pl.DataFrame) -> None:
+    """Merge rows into the monthly files ``obs/{param}/YYYY-MM.parquet``."""
+    if new.is_empty():
+        return
+    obs_dir(param).mkdir(parents=True, exist_ok=True)
+    for (month,), part in new.group_by(pl.col("time").dt.strftime("%Y-%m")):
+        path = obs_dir(param) / f"{month}.parquet"
+        if path.exists():
+            part = pl.concat([pl.read_parquet(path), part])
+        tmp = path.with_suffix(".tmp")
+        dedupe(part).write_parquet(tmp)
+        tmp.replace(path)  # atomic, so readers never see a half-written month
+
+
+def load_observations(param: str) -> pl.LazyFrame:
+    return pl.scan_parquet(obs_dir(param) / "*.parquet")
+
+
+def _jobs() -> list[tuple[int, str]]:
+    return [(row["station_id"], p) for p in PARAMS for row in load_stations().iter_rows(named=True) if row[f"has_{p}"]]
+
+
+def _fetch_all(jobs: list[tuple[int, str]], fetch, desc: str) -> dict[str, list[pl.DataFrame]]:
+    """Run ``fetch(station, param)`` for all jobs; returns the frames per parameter."""
+    frames: dict[str, list[pl.DataFrame]] = {p: [] for p in PARAMS}
     with ThreadPoolExecutor(8) as ex:
-        futures = {ex.submit(fetch_station_param, s, p): (s, p) for s, p in jobs}
-        for future in tqdm(as_completed(futures), total=len(futures), desc="observations"):
+        futures = {ex.submit(fetch, s, p): (s, p) for s, p in jobs}
+        for future in tqdm(as_completed(futures), total=len(futures), desc=desc):
             if e := future.exception():
                 log.error("failed %s: %r (re-run to retry)", futures[future], e)
+            else:
+                frames[futures[future][1]].append(future.result())
+    return frames
+
+
+def fetch_observations() -> None:
+    """Full history per station × parameter (run locally once, then uploaded)."""
+    jobs = _jobs()
+    for param in PARAMS:  # one parameter at a time keeps memory to ~one parameter's history
+        frames = _fetch_all([j for j in jobs if j[1] == param], fetch_station_param, f"observations {param}")[param]
+        if frames:
+            write_observations(param, pl.concat(frames))
+
+
+def _newest_observation() -> datetime | None:
+    """Newest hour on disk, taking the parameter that is furthest behind."""
+    newest = []
+    for param in PARAMS:
+        months = sorted(obs_dir(param).glob("*.parquet"))
+        if not months:
+            return None
+        newest.append(pl.read_parquet(months[-1], columns=["time"])["time"].max())
+    return min(newest)
+
+
+def update_observations() -> None:
+    """Hourly update: the last ~24 h, or the last ~4 months if the data on disk is older than that
+    (after an outage, or a late upload), so gaps fill themselves."""
+    newest = _newest_observation()
+    period = "latest-day" if newest and datetime.now(UTC) - newest < timedelta(hours=20) else "latest-months"
+    log.info("newest observation %s -> fetching %s", newest, period)
+    frames = _fetch_all(_jobs(), lambda s, p: fetch_latest(s, p, period), f"observations {period}")
+    for param, fs in frames.items():
+        if fs:
+            write_observations(param, pl.concat(fs))
