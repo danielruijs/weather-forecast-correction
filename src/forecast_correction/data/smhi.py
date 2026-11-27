@@ -130,7 +130,19 @@ def fetch_station_param(station_id: int, param: str) -> None:
 
     out = SMHI_DIR / "obs" / param / f"{station_id}.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
-    pl.concat([archive, latest]).sort("time").write_parquet(out)
+    dedupe(pl.concat([archive, latest])).write_parquet(out)
+
+
+def dedupe(obs: pl.DataFrame) -> pl.DataFrame:
+    """One row per time, sorted by time.
+
+    The archive occasionally holds two values for the same hour (e.g. pressure at 8 stations,
+    2025-02-05 → 02-22: one checked "G", one suspect "Y"); keep the checked one.
+    """
+    return (
+        obs.sort("time", pl.col("quality").cast(pl.String) != "G")  # G first within each hour
+        .unique("time", keep="first", maintain_order=True)
+    )
 
 
 def fetch_observations() -> None:
