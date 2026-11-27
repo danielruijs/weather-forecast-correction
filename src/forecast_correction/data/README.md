@@ -25,18 +25,16 @@ uv run fc-data obs           # 6 min
 uv run fc-data meps          # 52 h (the server allows 4 parallel downloads); resumable, re-run to retry failures
 uv run fc-data coverage      # data/raw/coverage/: gaps per source and date
 
-uv run modal volume create forecast-correction-raw              # once
-uv run modal volume put forecast-correction-raw data/raw /raw   # upload, 3-10 min; appears when done
-uv run modal deploy -m forecast_correction.modal_app            # start the hourly update
+uv run modal volume create forecast-correction-raw             # once
+uv run modal volume put forecast-correction-raw data/raw raw   # upload, 3-10 min; appears when done
+uv run modal deploy -m forecast_correction.modal_app           # start the hourly update
 ```
 
 To work locally with the up-to-date data from Modal (lands in `data/raw/`, `--force` overwrites):
 
 ```
-uv run modal volume get --force forecast-correction-raw /raw data
+uv run modal volume get --force forecast-correction-raw raw data
 ```
-
-In Git Bash, run `export MSYS_NO_PATHCONV=1` first, or it rewrites `/raw` to `C:/Program Files/Git/raw`.
 
 ## SMHI — `data/raw/smhi/` (88 MB)
 
