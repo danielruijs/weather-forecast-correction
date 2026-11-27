@@ -1,15 +1,37 @@
 # Raw data
 
-Download code for the two sources. Run with `uv run fc-data {stations,obs,meps}`.
-Files go to `data/raw/` (or `$FC_DATA_DIR/raw/`); all times are UTC.
+Download code for the two sources. Files go to `data/raw/` (or `$FC_DATA_DIR/raw/`); all times are UTC.
 
 | file | what |
 |---|---|
 | `smhi.py` | SMHI stations and hourly observations |
 | `meps.py` | MEPS forecasts (MET Norway THREDDS), cut out at the stations |
+| `coverage.py` | coverage and gaps report |
 | `__main__.py` | the `fc-data` command |
+| `../modal_app.py` | hourly update on Modal |
 
-## SMHI — `data/raw/smhi/` (363 MB)
+## Getting the data
+
+History is downloaded **once, locally**, then uploaded to the Modal Volume `forecast-correction-raw`.
+After that, Modal's hourly `update` adds new observations and forecast runs to the Volume. It
+normally fetches the last ~24 h of observations, but switches to the last ~4 months when the newest
+observation on the Volume is older than 20 h, and it fetches any MEPS run of the last 7 days that is
+missing. So gaps from an outage, or from uploading days after downloading, fill themselves (up to ~4
+months for observations, 7 days for forecasts).
+
+```
+uv run fc-data stations      # 10 s
+uv run fc-data obs           # 6 min
+uv run fc-data meps          # 52 h (the server allows 4 parallel downloads); resumable, re-run to retry failures
+uv run fc-data coverage      # data/raw/coverage/: gaps per source and date
+
+uv run modal volume put forecast-correction-raw data/raw /raw   # upload, 3-10 min; appears when done
+uv run modal deploy -m forecast_correction.modal_app           # start the hourly update
+```
+
+In Git Bash, run `export MSYS_NO_PATHCONV=1` first, or it rewrites `/raw` to `C:/Program Files/Git/raw`.
+
+## SMHI — `data/raw/smhi/` (88 MB)
 
 **`stations.parquet`**: the 142 stations that report both hourly temperature and precipitation.
 `has_*` says which other variables a station has.
@@ -27,7 +49,8 @@ station_id  from                 to                   lat    lon    elevation
 98230       1996-10-01 00:00:00  2026-11-24 21:20:16  59.34  18.05  43.13
 ```
 
-**`obs/{param}/{station_id}.parquet`**: one row per hour, from 2016-01-01.
+**`obs/{param}/YYYY-MM.parquet`**: one file per variable and month with all stations, one row per
+station and hour, from 2016-01-01.
 
 - `param`:
   - `t2m`: air temperature 2 m above ground, °C, measured at `time`
@@ -44,16 +67,18 @@ station_id  from                 to                   lat    lon    elevation
 - `source`: `archive` (quality-controlled, ends ~3 months ago) or `latest` (last ~4 months, unchecked)
 
 ```
-time                 value  quality  source
-2025-08-15 19:00:00  21.9   G        archive     (obs/t2m/98230)
-2025-08-15 20:00:00  14.7   G        archive
-2024-04-22 11:00:00  57.0   Y        archive     (obs/rh/98230)
-2026-11-24 21:00:00  0.0    G        latest      (obs/precip/98230)
+station_id  time                 value  quality  source
+98230       2025-08-15 19:00:00  21.9   G        archive     (obs/t2m/2025-08)
+98230       2025-08-15 20:00:00  14.7   G        archive
+98230       2024-04-22 11:00:00  57.0   Y        archive     (obs/rh/2024-04)
+98230       2026-11-24 21:00:00  0.0    G        latest      (obs/precip/2026-11)
 ```
 
-Missing hours are missing rows. Not every station has every parameter (e.g. `mslp` exists for 96 of 142).
+If an hour appears twice, `archive` wins over `latest`, then `G` over `Y` (the archive has both for
+pressure at 8 stations, 2025-02-05 → 02-22). Missing hours are missing rows, so a gap is never an
+observed 0.0 mm. Not every station has every parameter (e.g. `mslp` exists for 96 of 142).
 
-## MEPS — `data/raw/meps/` (2.3 GB)
+## MEPS — `data/raw/meps/` (2.4 GB)
 
 **`runs/YYYY/MM/meps_YYYYMMDDTHHZ.parquet`**: one file per forecast run (00, 06, 12, 18 UTC,
 2016-11-08 →; 14,614 runs), one row per station × lead hour 0–48 (6,958 rows).
@@ -88,5 +113,14 @@ station_id  cell_lat  cell_lon  dist_km  cell_elevation
 98230       59.33     18.03     1.62     21.94
 ```
 
-**Gaps:** 71 of 14,685 runs are missing: 57 not in the archive, 14 damaged 2017 files. From 2023-11 on,
-only 3 are missing (2025-05-13 12Z, 2026-09-02 00Z and 06Z).
+**Gaps:** 71 of 14,685 runs (to 2026-11-27 00Z) are missing: 57 not in the archive, 14 damaged 2017
+files. From 2023-11 on, only 3 are missing (2025-05-13 12Z, 2026-09-02 00Z and 06Z). The full list is
+in `coverage/summary.md`.
+
+## Coverage — `data/raw/coverage/`
+
+Written by `fc-data coverage`:
+
+- `smhi_daily.parquet`: param, station_id, date, hours with a value (0–24)
+- `meps_runs.parquet`: every expected run with `on_disk` and `grid`
+- `summary.md`: % of hours per variable and year, the missing MEPS runs, sizes
