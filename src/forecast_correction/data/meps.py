@@ -252,8 +252,8 @@ def _fetch_run(run: datetime, stations: pl.DataFrame, retries: int = 4) -> str:
     return "ok"
 
 
-def fetch_forecasts(start: datetime = FIRST_RUN, end: datetime | None = None) -> None:
-    """Download all runs in [start, end] not yet on disk, newest first."""
+def fetch_forecasts(start: datetime = FIRST_RUN, end: datetime | None = None) -> dict[str, int]:
+    """Download all runs in [start, end] not yet on disk, newest first; returns counts per outcome."""
     end = end or datetime.now(UTC)
     first = start + (FIRST_RUN - start) % RUN_INTERVAL  # round up to a run time
     runs = [first + i * RUN_INTERVAL for i in range(int((end - first) / RUN_INTERVAL) + 1)]
@@ -262,6 +262,8 @@ def fetch_forecasts(start: datetime = FIRST_RUN, end: datetime | None = None) ->
 
     stations = load_stations()
     counts = {"ok": 0, "missing": 0, "failed": 0}
+    if not todo:
+        return counts
     with ProcessPoolExecutor(WORKERS) as ex:
         futures = [ex.submit(_fetch_run, run, stations) for run in todo]
         bar = tqdm(as_completed(futures), total=len(futures), desc="MEPS runs")
@@ -269,3 +271,10 @@ def fetch_forecasts(start: datetime = FIRST_RUN, end: datetime | None = None) ->
             counts[future.result()] += 1
             bar.set_postfix(counts)
     log.info("done: %s", counts)
+    return counts
+
+
+def update_forecasts() -> dict[str, int]:
+    """Hourly update: any run of the last 7 days not yet on disk. Older than the live feed's ~2 days
+    comes from the archive, so a multi-day outage fills itself; runs on disk are skipped."""
+    return fetch_forecasts(datetime.now(UTC) - timedelta(days=7))
