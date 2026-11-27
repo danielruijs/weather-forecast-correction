@@ -82,6 +82,7 @@ GRIDS_DIR = MEPS_DIR / "grids"
 class Grid:
     """Station → grid-cell mapping for one grid layout."""
 
+    key: str  # layout id, also the name of its file in GRIDS_DIR
     box: tuple[int, int, int, int]  # y0, y1, x0, x1 (end-exclusive)
     iy: np.ndarray  # station cell row, relative to the box
     ix: np.ndarray  # station cell column, relative to the box
@@ -113,11 +114,12 @@ def _build_grid(ds: netCDF4.Dataset, stations: pl.DataFrame) -> Grid:
 
     # box with a 1-cell margin for the 3x3 neighbourhood
     y0, x0 = iy.min() - 1, ix.min() - 1
-    grid = Grid((y0, iy.max() + 2, x0, ix.max() + 2), iy - y0, ix - x0, np.cos(angle), np.sin(angle))
+    box = (y0, iy.max() + 2, x0, ix.max() + 2)
+    grid = Grid(_grid_key(ds), box, iy - y0, ix - x0, np.cos(angle), np.sin(angle))
 
     geopotential = _read_box(ds, "surface_geopotential", grid, n_time=1)[0]
     GRIDS_DIR.mkdir(parents=True, exist_ok=True)
-    path = GRIDS_DIR / f"{_grid_key(ds)}.parquet"
+    path = GRIDS_DIR / f"{grid.key}.parquet"
     tmp = path.with_suffix(f".{os.getpid()}.tmp")  # every worker builds the grid; write atomically
     pl.DataFrame(
         {
@@ -219,6 +221,7 @@ def extract_run(run: datetime, stations: pl.DataFrame) -> pl.DataFrame | None:
     ).select(
         "run_time",
         (pl.col("run_time") + AVAILABILITY_DELAY).alias("available_time"),
+        pl.lit(grid.key).alias("grid"),  # file in GRIDS_DIR with this run's cells
         (pl.col("run_time") + pl.duration(hours=pl.col("lead"))).alias("valid_time"),
         "lead",
         "station_id",

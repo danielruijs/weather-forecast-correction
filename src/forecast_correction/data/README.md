@@ -59,19 +59,28 @@ Missing hours are missing rows. Not every station has every parameter (e.g. `msl
 2016-11-08 →; 14,614 runs), one row per station × lead hour 0–48 (6,958 rows).
 
 ```
-run_time          available_time    valid_time        lead  station_id  t2m    precip  precip_3x3  rh     mslp     wind_u  wind_v  cloud  sw
-2025-08-14 18:00  2025-08-14 21:00  2025-08-14 18:00  0     98230       24.11  null    null        49.66  1022.09  1.43    4.61    1.00   null
-2025-08-14 18:00  2025-08-14 21:00  2025-08-15 19:00  25    98230       21.18  3.28    2.93        85.53  1009.01  2.78    2.07    1.00   5.27
-2025-08-14 18:00  2025-08-14 21:00  2025-08-15 20:00  26    98230       21.86  0.00    0.01        73.21  1009.12  4.80    -0.29   0.98   0.00
+run_time          available_time    grid         valid_time        lead  station_id  t2m    precip  precip_3x3  rh     mslp     wind_u  wind_v  cloud  sw
+2025-08-14 18:00  2025-08-14 21:00  1069x949_…   2025-08-14 18:00  0     98230       24.11  null    null        49.66  1022.09  1.43    4.61    1.00   null
+2025-08-14 18:00  2025-08-14 21:00  1069x949_…   2025-08-15 19:00  25    98230       21.18  3.28    2.93        85.53  1009.01  2.78    2.07    1.00   5.27
+2025-08-14 18:00  2025-08-14 21:00  1069x949_…   2025-08-15 20:00  26    98230       21.86  0.00    0.01        73.21  1009.12  4.80    -0.29   0.98   0.00
 ```
 
 - `available_time` = `run_time` + 3 h: when the run counts as published (see `AVAILABILITY_DELAY`).
+- `grid`: which file in `grids/` holds this run's station cells (full value `1069x949_-1060084_-1332518`).
 - `valid_time` = `run_time` + `lead` hours: the hour the forecast is for.
 - `t2m` °C, `rh` %, `mslp` hPa, `wind_u`/`wind_v` m/s (east/north), `cloud` 0–1.
 - `precip` mm in the hour ending at `valid_time`; `precip_3x3` the same, averaged over the 3×3 cells
   around the station; `sw` mean shortwave radiation over that hour, W/m². These three are `null` at lead 0.
 
-**`grids/*.parquet`**: the grid cell used for each station, one file per grid layout (3 layouts).
+**`grids/*.parquet`**: the grid cell used for each station, one file per grid layout. MET Norway
+changed the MEPS grid twice (all 2.5 km); the file name is the grid size (y×x cells) plus its origin:
+
+| grid | runs | station cells |
+|---|---|---|
+| `949x739_…` | 2016-11-08 → 2017-09-06 00Z | |
+| `949x889_…` | 2017-09-06 06Z → 2020-02-04 06Z | domain widened; 127 of 142 stations keep their cell |
+| `1069x949_…` | 2020-02-04 12Z → | new grid; every station gets a new cell (terrain height up to 69 m different) |
+
 `cell_elevation` is the model's terrain height, which can differ from the station's.
 
 ```
